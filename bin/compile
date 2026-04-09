@@ -8,72 +8,64 @@ BUILD_DIR=$1
 CACHE_DIR=$2
 ENV_DIR=$3
 
-# Define paths for caching Rust installation
-CARGO_HOME="$CACHE_DIR/cargo"
-RUSTUP_HOME="$CACHE_DIR/rustup"
+# Constants
+DEFAULT_TYPST_VERSION="0.14.2"
+TYPST_BASE_URL="https://github.com/typst/typst/releases/download"
 
-# Ensure the cache directories exist
-mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
-
-# Install Rust (using rustup), with paths set to use the cache
-echo "-----> Installing Rust..."
-
-# Set environment variables for Rust to use the cache
-export CARGO_HOME
-export RUSTUP_HOME
-export PATH="$CARGO_HOME/bin:$PATH"
-
-# Install Rust if it's not already cached
-CACHE_AGE_DAYS=7
-CACHE_TIMESTAMP_FILE="$CARGO_HOME/.cache_timestamp"
-
-if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
-    echo "-----> Rust is not cached, downloading..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    date +%s > "$CACHE_TIMESTAMP_FILE"
+# Read TYPST_VERSION from config vars
+if [ -f "$ENV_DIR/TYPST_VERSION" ]; then
+  TYPST_VERSION=$(cat "$ENV_DIR/TYPST_VERSION" | tr -d '[:space:]')
 else
-    echo "-----> Using cached Rust installation"
-
-    # Check if cache is older than CACHE_AGE_DAYS
-    if [ -f "$CACHE_TIMESTAMP_FILE" ]; then
-        CACHE_TIME=$(cat "$CACHE_TIMESTAMP_FILE")
-        CURRENT_TIME=$(date +%s)
-        AGE_DAYS=$(( ($CURRENT_TIME - $CACHE_TIME) / 86400 ))
-
-        if [ $AGE_DAYS -gt $CACHE_AGE_DAYS ]; then
-            echo "-----> Cache is $AGE_DAYS days old (max: $CACHE_AGE_DAYS days), updating Rust..."
-            rustup self update
-            rustup update stable
-            date +%s > "$CACHE_TIMESTAMP_FILE"
-        else
-            echo "-----> Cache is $AGE_DAYS days old, using cached version"
-        fi
-    else
-        echo "-----> No cache timestamp found, updating Rust..."
-        rustup self update
-        rustup update stable
-        date +%s > "$CACHE_TIMESTAMP_FILE"
-    fi
+  TYPST_VERSION="$DEFAULT_TYPST_VERSION"
 fi
 
-# Ensure stable Rust is installed and set as default
-rustup default stable
-rustup --version
-cargo --version
+# Detect architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  TYPST_ARCH="x86_64" ;;
+  aarch64) TYPST_ARCH="aarch64" ;;
+  *)       echo "  !     Unsupported architecture: $ARCH" >&2; exit 1 ;;
+esac
 
-# Install typst-cli using Cargo
-echo "-----> Installing typst-cli..."
-cargo install typst-cli --root "$CARGO_HOME" --locked
+ARCHIVE_NAME="typst-${TYPST_ARCH}-unknown-linux-musl"
+DOWNLOAD_URL="${TYPST_BASE_URL}/v${TYPST_VERSION}/${ARCHIVE_NAME}.tar.xz"
 
-# Ensure typst-cli is available to the app at runtime
-# Copy typst-cli binary to a directory that will persist on the Heroku slug
+# Cache logic: skip download if version matches
+CACHE_VERSION_FILE="$CACHE_DIR/typst-version"
+CACHED_BINARY="$CACHE_DIR/typst"
+
+if [ -f "$CACHE_VERSION_FILE" ] && [ "$(cat "$CACHE_VERSION_FILE")" = "$TYPST_VERSION" ] && [ -f "$CACHED_BINARY" ]; then
+  echo "-----> Using cached Typst v${TYPST_VERSION}"
+else
+  echo "-----> Downloading Typst v${TYPST_VERSION} for ${TYPST_ARCH}..."
+
+  # Clean old cache
+  rm -f "$CACHED_BINARY" "$CACHE_VERSION_FILE"
+
+  curl -sSfL "$DOWNLOAD_URL" -o "$CACHE_DIR/${ARCHIVE_NAME}.tar.xz" || {
+    echo "  !     Failed to download Typst v${TYPST_VERSION}" >&2
+    echo "  !     URL: $DOWNLOAD_URL" >&2
+    exit 1
+  }
+
+  # Extract binary
+  tar -xJf "$CACHE_DIR/${ARCHIVE_NAME}.tar.xz" -C "$CACHE_DIR"
+  cp "$CACHE_DIR/${ARCHIVE_NAME}/typst" "$CACHED_BINARY"
+  chmod +x "$CACHED_BINARY"
+
+  # Cleanup archive and extracted directory
+  rm -rf "$CACHE_DIR/${ARCHIVE_NAME}.tar.xz" "$CACHE_DIR/${ARCHIVE_NAME}"
+
+  echo "$TYPST_VERSION" > "$CACHE_VERSION_FILE"
+  echo "-----> Typst v${TYPST_VERSION} downloaded successfully"
+fi
+
+# Install into slug
 mkdir -p "$BUILD_DIR/.heroku/bin"
-cp "$CARGO_HOME/bin/typst" "$BUILD_DIR/.heroku/bin"
+cp "$CACHED_BINARY" "$BUILD_DIR/.heroku/bin/typst"
 
-echo "-----> typst-cli installation complete."
-
-# Add typst to PATH at runtime
+# Set up PATH for runtime
 mkdir -p "$BUILD_DIR/.profile.d"
-cat <<EOF >> "$BUILD_DIR/.profile.d/typst.sh"
-export PATH="\$PATH:/app/.heroku/bin"
-EOF
+echo 'export PATH="$PATH:/app/.heroku/bin"' > "$BUILD_DIR/.profile.d/typst.sh"
+
+echo "-----> Typst v${TYPST_VERSION} installed"

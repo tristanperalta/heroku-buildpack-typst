@@ -1,3 +1,15 @@
-#!/bin/sh
-# Always install
+#!/usr/bin/env bash
+
+# Detect if this app uses Typst by checking for .typ files.
+# Falls back to exit 0 since users explicitly add this buildpack.
+
+BUILD_DIR=$1
+
+if find "$BUILD_DIR" -maxdepth 3 -name '*.typ' -print -quit 2>/dev/null | grep -q .; then
+  echo "Typst"
+  exit 0
+fi
+
+# Fallback: user explicitly added this buildpack, so always match
+echo "Typst"
 exit 0
